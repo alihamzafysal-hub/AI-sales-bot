@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Official Consultation Assistant</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+   <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <style>
         .chat-scroll::-webkit-scrollbar { width: 5px; }
@@ -81,7 +81,10 @@
 
         function appendMessage(text, isUser = false) {
             const div = document.createElement("div");
-            div.className = isUser ? "flex justify-end" : "flex items-start gap-2.5";
+           div.className = isUser ? "flex justify-end" : "flex items-start gap-2.5";
+
+            // Markdown symbols (**, ###) ko clean HTML me convert karne ke liye
+            const formattedText = typeof marked !== 'undefined' ? marked.parseInline(text) : text;
 
             if (isUser) {
                 div.innerHTML = `
@@ -93,7 +96,7 @@
                 div.innerHTML = `
                     <img src="${logoUrl}" class="w-8 h-8 rounded-full border border-slate-300 bg-white object-cover">
                     <div class="bg-white border border-slate-200 text-slate-800 p-3.5 rounded-2xl rounded-tl-none shadow-sm max-w-[80%] text-sm">
-                        ${text}
+                        ${formattedText}
                     </div>
                 `;
             }
