@@ -11,12 +11,10 @@ from google import genai
 
 app = FastAPI(title="Official AI Sales Agent")
 
-# Absolute path resolution for Render environment
 BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
-# Database Initialization
 def init_db():
     db_path = BASE_DIR / "database.db"
     conn = sqlite3.connect(str(db_path))
@@ -77,9 +75,8 @@ async def chat_endpoint(payload: ChatPayload):
     try:
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key:
-            return JSONResponse({"reply": "API Key configure nahi hai. Render par GEMINI_API_KEY add karein."}, status_code=500)
+            return JSONResponse({"reply": "Render par GEMINI_API_KEY set nahi hai."}, status_code=500)
 
-        # Initialize official GenAI client
         client = genai.Client(api_key=api_key)
 
         prompt_text = f"System Instruction: {SYSTEM_PROMPT}\n\n"
@@ -87,14 +84,28 @@ async def chat_endpoint(payload: ChatPayload):
             prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
         prompt_text += f"User: {payload.message}\nAssistant:"
 
-        # Using recommended gemini-3.8-flash model
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt_text
-        )
-        raw_text = response.text or "I apologize, could you please repeat that?"
+        # Multi-model fallback: agar aik busy ho to agla khud handle kare
+        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+        raw_text = None
+        last_error = None
 
-        # Extract lead data if qualified
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text
+                )
+                if response and response.text:
+                    raw_text = response.text
+                    break
+            except Exception as e:
+                last_error = e
+                continue
+
+        if not raw_text:
+            return JSONResponse({"reply": f"Traffic high hai, please 10 seconds baad dobara try karein. (Details: {str(last_error)})"}, status_code=500)
+
+        # Lead capture handling
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -106,14 +117,13 @@ async def chat_endpoint(payload: ChatPayload):
                     phone=lead_json.get("phone", "N/A"),
                     requirement=lead_json.get("requirement", "Interested in consultation")
                 )
-            except Exception as e:
-                print(f"Error parsing lead data: {e}")
+            except Exception as err:
+                print(f"Error parsing lead data: {err}")
             return JSONResponse({"reply": clean_reply, "lead_captured": True})
 
         return JSONResponse({"reply": raw_text, "lead_captured": False})
 
     except Exception as e:
-        print(f"Server Error: {str(e)}")
         return JSONResponse({"reply": f"Error: {str(e)}"}, status_code=500)
 
 @app.get("/leads", response_class=HTMLResponse)
