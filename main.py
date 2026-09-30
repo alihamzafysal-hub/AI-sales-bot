@@ -8,8 +8,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from google import genai
+from google.genai import types
 
-app = FastAPI(title="Official AI Sales Agent")
+app = FastAPI(title="Water Leakage Specialist AI")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
@@ -46,16 +47,26 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
     conn.commit()
     conn.close()
 
-# Pure Professional English System Prompt
+# Specialist Diagnostic Knowledge Base & Framework
 SYSTEM_PROMPT = """
-You are the Official AI Sales & Consultation Executive representing NextGen Sol.
-Always communicate in professional, fluent, and courteous English.
+You are the Senior Technical Specialist & Diagnostics Engineer for 'NextGen Leak & Water Damage Solutions'.
+You are NOT an aggressive sales bot; you are a qualified technical advisor.
 
-Your objectives:
-1. Warmly greet the client and answer questions regarding our digital, AI, and technical solutions concisely.
-2. Qualify their needs and politely request their Name, Business Email, and Phone number to schedule a full consultation or provide an official quote.
-3. Keep your answers direct, clear, and under 3-4 sentences to ensure fast communication.
-4. Once you have acquired their contact details (at least name and email or phone), append this exact block at the very end of your response:
+Your Core Knowledge & Expertise:
+1. Ceiling & Roof Leaks: Acoustic leak detection, moisture mapping, roof flashing, and freeze-thaw pipe cracks.
+2. Under-Slab & Foundation Leaks: Non-destructive ultrasonic detection, thermal imaging, pressure testing.
+3. Pipe Bursts & High Pressure: Immediate safety advice (turn off main stopcock/shut-off valve), isolation of electrical circuits near water.
+4. Damp, Mold & Structural Drying: Commercial dehumidification, psychrometric drying, and air sanitization.
+
+Your Communication Framework:
+- Tone: Empathetic, highly technical, reassuring, and professional.
+- First Step (Triage): When user states a problem, provide immediate practical advice (e.g., "First, please shut off your main water valve to prevent ceiling collapse").
+- Second Step (Diagnosis): Explain what causes this issue (e.g., hidden pinhole copper pipe failure, failed silicone joints, or pressure spikes).
+- Third Step (Action): Offer a certified engineer visit or detailed quotation. Politely ask for their Name, Contact Phone/Email, and Postcode/City.
+- Always communicate fluently in English.
+
+Hidden Lead Trigger:
+Once the customer has provided contact details (name with phone or email), append this exact block at the very end of your response:
 LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
 """
 
@@ -76,30 +87,36 @@ async def chat_endpoint(payload: ChatPayload):
     try:
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key:
-            return JSONResponse({"reply": "GEMINI_API_KEY is not configured on the server."}, status_code=500)
+            return JSONResponse({"reply": "System configuration error: GEMINI_API_KEY is missing on Render."}, status_code=500)
 
         client = genai.Client(api_key=api_key)
 
-        # Build clean conversation history
+        # Build stable Gemini API compatible contents
         contents = []
-        for msg in payload.history[-4:]:  # Keep lightweight for blazing fast speed
+        for msg in payload.history[-6:]:
             role = "user" if msg.role == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": msg.content}]})
+            contents.append(types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=msg.content)]
+            ))
         
-        contents.append({"role": "user", "parts": [{"text": payload.message}]})
+        contents.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=payload.message)]
+        ))
 
-        # Ultra-fast generation with config
+        # Direct generation with native GenAI types configuration
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-2.5-flash",
             contents=contents,
-            config={
-                "system_instruction": SYSTEM_PROMPT,
-                "temperature": 0.6,
-                "max_output_tokens": 300
-            }
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.6,
+                max_output_tokens=400
+            )
         )
 
-        raw_text = response.text.strip() if response and response.text else "How may I assist your business today?"
+        raw_text = response.text.strip() if (response and response.text) else "Could you describe where the water leak or dampness is located?"
 
         # Extract lead if present
         if "LEAD_DATA:" in raw_text:
@@ -111,17 +128,18 @@ async def chat_endpoint(payload: ChatPayload):
                     name=lead_json.get("name", "N/A"),
                     email=lead_json.get("email", "N/A"),
                     phone=lead_json.get("phone", "N/A"),
-                    requirement=lead_json.get("requirement", "Consultation requested")
+                    requirement=lead_json.get("requirement", "Water Leakage Consultation")
                 )
-            except Exception as err:
-                print(f"Error parsing lead data: {err}")
+            except Exception as parse_err:
+                print(f"Lead parsing error: {parse_err}")
             return JSONResponse({"reply": clean_reply, "lead_captured": True})
 
         return JSONResponse({"reply": raw_text, "lead_captured": False})
 
     except Exception as e:
-        print(f"API Error: {str(e)}")
-        return JSONResponse({"reply": "Thank you for reaching out. Please leave your contact details or email, and our team will get in touch shortly."}, status_code=200)
+        print(f"Execution Error: {str(e)}")
+        # Return exact error temporarily if API fails so you can see it
+        return JSONResponse({"reply": f"Diagnostic Engine Notice: {str(e)}"}, status_code=200)
 
 @app.get("/leads", response_class=HTMLResponse)
 async def view_leads(request: Request):
