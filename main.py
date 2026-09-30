@@ -22,7 +22,19 @@ templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
 # Model name ko Render ke env variable se badla ja sakta hai
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+
+# Jawab ki lambai. Thinking ke tokens isi mein count hote hain, is liye 200 bohat kam hai
+# (jawab beech mein kat jata hai ya khali aata hai). Speed ke liye thinking LOW rakhi hai.
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "800"))
+
+# Agar pehla model fail ho to ye agle models try honge
+MODEL_CHAIN = []
+for _m in [GEMINI_MODEL, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-2.5-flash"]:
+    if _m and _m not in MODEL_CHAIN:
+        MODEL_CHAIN.append(_m)
+
+LAST_ERRORS = []  # /diagnostics page ke liye
 
 # ---------------------------------------------------------------
 # Leads page security (HTTP Basic Auth)
@@ -140,34 +152,54 @@ def build_contents(history: List[ChatMessage], message: str):
     return contents
 
 
-def generate_reply(client, contents, attempts: int = 3) -> str:
-    """Gemini ko retry ke saath call karta hai. Fail hone par saaf error raise karta hai."""
-    last_error = None
+def make_config(model: str) -> types.GenerateContentConfig:
+    kwargs = dict(system_instruction=SYSTEM_PROMPT, max_output_tokens=MAX_OUTPUT_TOKENS)
+    if hasattr(types, "ThinkingConfig"):
+        if "2.5" in model:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        elif "gemini-3" in model:
+            # Gemini 3.x: temperature ignore hota hai, MINIMAL allowed nahi, LOW sab se tez hai
+            try:
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+            except Exception as cfg_err:
+                print(f"[Gemini] thinking_level not supported by installed SDK: {cfg_err}")
+    else:
+        kwargs["temperature"] = 0.5
+    return types.GenerateContentConfig(**kwargs)
 
-    for attempt in range(1, attempts + 1):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.5,
-                    max_output_tokens=1200,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                ),
-            )
-            text = (response.text or "").strip() if response else ""
-            if text:
-                return text
-            last_error = RuntimeError(f"Gemini returned an empty response (attempt {attempt})")
-            print(f"[Gemini] {last_error}")
-        except Exception as err:
-            last_error = err
-            print(f"[Gemini] Attempt {attempt} failed with model '{GEMINI_MODEL}': {err}")
-            traceback.print_exc()
-        time.sleep(attempt)  # 1s, 2s, 3s
 
-    raise last_error or RuntimeError("Gemini failed without returning an error")
+def generate_reply(client, contents) -> str:
+    """Har model ko baari baari try karta hai. Sab fail hon to aakhri error raise karta hai."""
+    global LAST_ERRORS
+    errors = []
+
+    for model in MODEL_CHAIN:
+        for attempt in (1, 2):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=make_config(model),
+                )
+                text = (response.text or "").strip() if response else ""
+                if text:
+                    LAST_ERRORS = []
+                    return text
+                errors.append(f"{model}: empty response")
+                print(f"[Gemini] {model}: empty response")
+                break
+            except Exception as err:
+                msg = f"{model}: {type(err).__name__}: {err}"
+                errors.append(msg)
+                print(f"[Gemini] {msg}")
+                text_err = str(err)
+                # Ye errors retry se theek nahi hote, seedha agle model par jao
+                if any(k in text_err for k in ("404", "NOT_FOUND", "400", "INVALID_ARGUMENT", "403", "PERMISSION_DENIED", "API key")):
+                    break
+                time.sleep(1)
+
+    LAST_ERRORS = errors
+    raise RuntimeError(" | ".join(errors) or "Gemini failed without returning an error")
 
 
 def clean_formatting(text: str) -> str:
@@ -225,6 +257,33 @@ async def chat_endpoint(payload: ChatPayload):
             ),
             "lead_captured": False
         }, status_code=200)
+
+
+@app.get("/diagnostics")
+async def diagnostics(admin: str = Depends(require_admin)):
+    """Password ke peeche: Gemini connection ka live test."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    result = {
+        "api_key_set": bool(api_key),
+        "api_key_preview": (api_key[:4] + "..." + api_key[-3:]) if len(api_key) > 8 else "too short / missing",
+        "models_to_try": MODEL_CHAIN,
+        "tests": [],
+    }
+    if not api_key:
+        return JSONResponse(result)
+
+    client = genai.Client(api_key=api_key)
+    for model in MODEL_CHAIN:
+        try:
+            r = client.models.generate_content(
+                model=model,
+                contents="Reply with the single word OK",
+                config=make_config(model),
+            )
+            result["tests"].append({"model": model, "status": "WORKING", "reply": (r.text or "")[:50]})
+        except Exception as err:
+            result["tests"].append({"model": model, "status": "FAILED", "error": f"{type(err).__name__}: {err}"[:400]})
+    return JSONResponse(result)
 
 
 @app.get("/leads", response_class=HTMLResponse)
