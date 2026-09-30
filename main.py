@@ -16,10 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
-# Gemini API Client
-api_key = os.environ.get("GEMINI_API_KEY", "")
-client = genai.Client(api_key=api_key) if api_key else None
-
+# Database Initialization
 def init_db():
     db_path = BASE_DIR / "database.db"
     conn = sqlite3.connect(str(db_path))
@@ -52,10 +49,10 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
     conn.close()
 
 SYSTEM_PROMPT = """
-You are the Official AI Sales & Consultation Executive representing the company.
+You are the Official AI Sales & Consultation Executive representing NextGen Sol.
 Your goals:
 1. Welcome visitors warmly and professionally.
-2. Answer queries concisely about our premium services/solutions.
+2. Answer queries concisely about our premium digital and tech solutions.
 3. Politely collect their Name, Business Email/Phone, and project requirements.
 4. Once you have acquired contact details, append this exact hidden block at the very end of your response:
 LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
@@ -71,7 +68,6 @@ class ChatPayload(BaseModel):
     history: List[ChatMessage]
     message: str
 
-# FIX: Yahan 'request=request' pehle pass kiya hai taake naye Starlette mein crash na ho
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -79,22 +75,25 @@ async def home(request: Request):
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatPayload):
     try:
-        if not client:
-            return JSONResponse({"reply": "GEMINI_API_KEY environment variable mein set nahi hai."}, status_code=500)
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return JSONResponse({"reply": "API Key configure nahi hai. Render par GEMINI_API_KEY add karein."}, status_code=500)
 
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text=SYSTEM_PROMPT)])]
-        for msg in payload.history:
-            role = "user" if msg.role == "user" else "model"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.content)]))
-        
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=payload.message)]))
+        # Fresh client per request
+        client = genai.Client(api_key=api_key)
+
+        prompt_text = f"System Instruction: {SYSTEM_PROMPT}\n\n"
+        for msg in payload.history[-6:]:  # Keep recent context
+            prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
+        prompt_text += f"User: {payload.message}\nAssistant:"
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=contents
+            contents=prompt_text
         )
         raw_text = response.text or "I apologize, could you please repeat that?"
 
+        # Extract lead if present
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -113,9 +112,10 @@ async def chat_endpoint(payload: ChatPayload):
         return JSONResponse({"reply": raw_text, "lead_captured": False})
 
     except Exception as e:
-        return JSONResponse({"reply": "System busy, please try again shortly.", "error": str(e)}, status_code=500)
+        print(f"Server Error: {str(e)}")
+        # Logs me exact error print karega taake asani se pata chal sake
+        return JSONResponse({"reply": f"Error: {str(e)}"}, status_code=500)
 
-# FIX: Yahan bhi 'request=request' pehle aur context alag se pass kiya hai
 @app.get("/leads", response_class=HTMLResponse)
 async def view_leads(request: Request):
     db_path = BASE_DIR / "database.db"
