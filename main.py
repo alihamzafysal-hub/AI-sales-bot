@@ -105,9 +105,9 @@ async def chat_endpoint(payload: ChatPayload):
             parts=[types.Part.from_text(text=payload.message)]
         ))
 
-        # Direct generation with native GenAI types configuration
+       # Direct generation with native GenAI types configuration
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
