@@ -87,10 +87,10 @@ async def chat_endpoint(payload: ChatPayload):
             prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
         prompt_text += f"User: {payload.message}\nAssistant:"
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt_text
-        )
+       response = client.models.generate_content(
+    model="gemini-3.8-flash",
+    contents=prompt_text
+)
         raw_text = response.text or "I apologize, could you please repeat that?"
 
         # Extract lead if present
