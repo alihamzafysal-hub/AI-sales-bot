@@ -46,16 +46,17 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
     conn.commit()
     conn.close()
 
+# Pure Professional English System Prompt
 SYSTEM_PROMPT = """
 You are the Official AI Sales & Consultation Executive representing NextGen Sol.
-Your goals:
-1. Welcome visitors warmly and professionally.
-2. Answer queries concisely about our premium digital and tech solutions.
-3. Politely collect their Name, Business Email/Phone, and project requirements.
-4. Once you have acquired contact details, append this exact hidden block at the very end of your response:
-LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
+Always communicate in professional, fluent, and courteous English.
 
-Maintain an elegant, helpful, and executive tone at all times.
+Your objectives:
+1. Warmly greet the client and answer questions regarding our digital, AI, and technical solutions concisely.
+2. Qualify their needs and politely request their Name, Business Email, and Phone number to schedule a full consultation or provide an official quote.
+3. Keep your answers direct, clear, and under 3-4 sentences to ensure fast communication.
+4. Once you have acquired their contact details (at least name and email or phone), append this exact block at the very end of your response:
+LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
 """
 
 class ChatMessage(BaseModel):
@@ -66,34 +67,6 @@ class ChatPayload(BaseModel):
     history: List[ChatMessage]
     message: str
 
-# Cache the best working model dynamically
-CACHED_MODEL = None
-
-def get_active_model(client: genai.Client) -> str:
-    global CACHED_MODEL
-    if CACHED_MODEL:
-        return CACHED_MODEL
-
-    try:
-        # Google API se automatically active models ki list maango
-        models = client.models.list()
-        candidates = []
-        for m in models:
-            name = m.name
-            # Pro models free tier par allow nahi hotay (quota 0 hota hai), sirf Flash / Standard models lein
-            if "flash" in name.lower() and "generateContent" in getattr(m, "supported_actions", ["generateContent"]):
-                candidates.append(name.replace("models/", ""))
-
-        if candidates:
-            # Sab se latest active model select karo
-            CACHED_MODEL = candidates[-1]
-            return CACHED_MODEL
-    except Exception as e:
-        print(f"Auto-detection fallback warning: {e}")
-
-    # Fallback to general flash if listing fails
-    return "gemini-3.8-flash"
-
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -103,31 +76,32 @@ async def chat_endpoint(payload: ChatPayload):
     try:
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key:
-            return JSONResponse({"reply": "GEMINI_API_KEY environment variable set nahi hai."}, status_code=500)
+            return JSONResponse({"reply": "GEMINI_API_KEY is not configured on the server."}, status_code=500)
 
         client = genai.Client(api_key=api_key)
 
-        prompt_text = f"System Instruction: {SYSTEM_PROMPT}\n\n"
-        for msg in payload.history[-6:]:
-            prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
-        prompt_text += f"User: {payload.message}\nAssistant:"
+        # Build clean conversation history
+        contents = []
+        for msg in payload.history[-4:]:  # Keep lightweight for blazing fast speed
+            role = "user" if msg.role == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg.content}]})
+        
+        contents.append({"role": "user", "parts": [{"text": payload.message}]})
 
-        # Google se live valid model uthao
-        selected_model = get_active_model(client)
+        # Ultra-fast generation with config
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=contents,
+            config={
+                "system_instruction": SYSTEM_PROMPT,
+                "temperature": 0.6,
+                "max_output_tokens": 300
+            }
+        )
 
-        try:
-            response = client.models.generate_content(
-                model=selected_model,
-                contents=prompt_text
-            )
-            raw_text = response.text or "I apologize, could you please repeat that?"
-        except Exception as api_err:
-            # Agar rate limit (429) ya issue aaye to cached reset kar ke ek dafa fallback try karein
-            global CACHED_MODEL
-            CACHED_MODEL = None
-            return JSONResponse({"reply": f"Model busy: {str(api_err)}"}, status_code=500)
+        raw_text = response.text.strip() if response and response.text else "How may I assist your business today?"
 
-        # Lead capture handling
+        # Extract lead if present
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -137,7 +111,7 @@ async def chat_endpoint(payload: ChatPayload):
                     name=lead_json.get("name", "N/A"),
                     email=lead_json.get("email", "N/A"),
                     phone=lead_json.get("phone", "N/A"),
-                    requirement=lead_json.get("requirement", "Interested in consultation")
+                    requirement=lead_json.get("requirement", "Consultation requested")
                 )
             except Exception as err:
                 print(f"Error parsing lead data: {err}")
@@ -146,7 +120,8 @@ async def chat_endpoint(payload: ChatPayload):
         return JSONResponse({"reply": raw_text, "lead_captured": False})
 
     except Exception as e:
-        return JSONResponse({"reply": f"Error: {str(e)}"}, status_code=500)
+        print(f"API Error: {str(e)}")
+        return JSONResponse({"reply": "Thank you for reaching out. Please leave your contact details or email, and our team will get in touch shortly."}, status_code=200)
 
 @app.get("/leads", response_class=HTMLResponse)
 async def view_leads(request: Request):
