@@ -85,7 +85,7 @@ async def chat_endpoint(payload: ChatPayload):
         prompt_text += f"User: {payload.message}\nAssistant:"
 
         # Multi-model fallback: agar aik busy ho to agla khud handle kare
-        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+        models_to_try = ["gemini-3.8-flash", "gemini-3.1-pro-preview"]
         raw_text = None
         last_error = None
 
