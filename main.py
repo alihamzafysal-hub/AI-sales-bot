@@ -73,7 +73,6 @@ Your Communication Framework:
 Hidden Lead Trigger:
 Once the customer has provided contact details (name with phone or email), append this exact block at the very end of your response:
 LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
-"""
 
 class ChatMessage(BaseModel):
     role: str
