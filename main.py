@@ -1,11 +1,15 @@
 import os
+import re
 import json
 import time
+import secrets
 import sqlite3
+import traceback
 from pathlib import Path
 from typing import List
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from google import genai
@@ -16,6 +20,40 @@ app = FastAPI(title="Water Leakage Specialist AI")
 BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
+
+# Model name ko Render ke env variable se badla ja sakta hai
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+
+# ---------------------------------------------------------------
+# Leads page security (HTTP Basic Auth)
+# Render mein ye do env variables zaroor set karein:
+#   LEADS_USERNAME  (default: admin)
+#   LEADS_PASSWORD  (zaroori)
+# ---------------------------------------------------------------
+security = HTTPBasic()
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    admin_user = os.environ.get("LEADS_USERNAME", "admin")
+    admin_pass = os.environ.get("LEADS_PASSWORD", "")
+
+    if not admin_pass:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Leads portal disabled: LEADS_PASSWORD is not set on the server.",
+        )
+
+    user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), admin_user.encode("utf-8"))
+    pass_ok = secrets.compare_digest(credentials.password.encode("utf-8"), admin_pass.encode("utf-8"))
+
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 
 def init_db():
     db_path = BASE_DIR / "database.db"
@@ -35,7 +73,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 def save_lead(name: str, email: str, phone: str, requirement: str):
     db_path = BASE_DIR / "database.db"
@@ -47,6 +87,7 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
     )
     conn.commit()
     conn.close()
+
 
 SYSTEM_PROMPT = """You are the Senior Technical Diagnostics Specialist at NextGen Leak & Water Damage Solutions.
 
@@ -60,6 +101,7 @@ Rules & Diagnostic Protocol:
    - Step 1: Immediate Safety/Triage (e.g., turn off the isolation valve under the sink, place a bucket, stop using the appliance).
    - Step 2: Technical Cause (e.g., failed P-trap rubber washer, corroded copper pipe, loose compression nut, or silicone seal degradation).
    - Step 3: Professional Action (offer to dispatch an engineer or provide a quotation, and ask for their Name, Phone number, and Postcode/City).
+   - Always build on what the client has already told you. Never repeat a question they have already answered.
 
 3. Formatting:
    Always respond in clean, fluent English. Complete every sentence thoroughly. Do not use asterisks or hashes.
@@ -68,17 +110,75 @@ Rules & Diagnostic Protocol:
    Whenever the client shares their contact details (name with phone or email), append this exact hidden block at the very end of your reply:
    LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}"""
 
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+
 
 class ChatPayload(BaseModel):
     history: List[ChatMessage]
     message: str
 
+
+def build_contents(history: List[ChatMessage], message: str):
+    """Gemini ke liye clean multi-turn history banata hai."""
+    recent = list(history[-6:])
+
+    # Gemini conversation ka pehla message 'user' ka hona chahiye
+    while recent and recent[0].role != "user":
+        recent.pop(0)
+
+    contents = []
+    for msg in recent:
+        role = "user" if msg.role == "user" else "model"
+        if not msg.content or not msg.content.strip():
+            continue
+        contents.append(types.Content(role=role, parts=[types.Part(text=msg.content)]))
+
+    contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+    return contents
+
+
+def generate_reply(client, contents, attempts: int = 3) -> str:
+    """Gemini ko retry ke saath call karta hai. Fail hone par saaf error raise karta hai."""
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.5,
+                    max_output_tokens=1200,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            text = (response.text or "").strip() if response else ""
+            if text:
+                return text
+            last_error = RuntimeError(f"Gemini returned an empty response (attempt {attempt})")
+            print(f"[Gemini] {last_error}")
+        except Exception as err:
+            last_error = err
+            print(f"[Gemini] Attempt {attempt} failed with model '{GEMINI_MODEL}': {err}")
+            traceback.print_exc()
+        time.sleep(attempt)  # 1s, 2s, 3s
+
+    raise last_error or RuntimeError("Gemini failed without returning an error")
+
+
+def clean_formatting(text: str) -> str:
+    """Prompt ke mutabiq asterisks aur hashes hata deta hai."""
+    return text.replace("*", "").replace("#", "").strip()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
+
 
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatPayload):
@@ -88,73 +188,47 @@ async def chat_endpoint(payload: ChatPayload):
             return JSONResponse({"reply": "Configuration Notice: GEMINI_API_KEY is missing on Render."}, status_code=500)
 
         client = genai.Client(api_key=api_key)
-
-        # Build clean structured multi-turn conversation
-        contents = []
-        for msg in payload.history[-6:]:
-            role = "user" if msg.role == "user" else "model"
-            contents.append(types.Content(
-                role=role,
-                parts=[types.Part(text=msg.content)]
-            ))
-
-        contents.append(types.Content(
-            role="user",
-            parts=[types.Part(text=payload.message)]
-        ))
-
-        response = None
-        last_error = None
-
-        # Retry loop for traffic spikes
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        temperature=0.5,
-                        max_output_tokens=600
-                    )
-                )
-                if response and response.text:
-                    break
-            except Exception as err:
-                last_error = err
-                time.sleep(1)
-
-        if not response or not response.text:
-            raise last_error
-
-        raw_text = response.text.strip()
+        contents = build_contents(payload.history, payload.message)
+        raw_text = generate_reply(client, contents)
 
         # Lead capture handling
         if "LEAD_DATA:" in raw_text:
-            parts = raw_text.split("LEAD_DATA:")
-            clean_reply = parts[0].strip()
+            parts = raw_text.split("LEAD_DATA:", 1)
+            clean_reply = clean_formatting(parts[0])
             try:
-                lead_json = json.loads(parts[1].strip())
+                match = re.search(r"\{.*\}", parts[1], re.DOTALL)
+                if not match:
+                    raise ValueError("No JSON object found after LEAD_DATA")
+                lead_json = json.loads(match.group(0))
                 save_lead(
                     name=lead_json.get("name", "N/A"),
                     email=lead_json.get("email", "N/A"),
                     phone=lead_json.get("phone", "N/A"),
                     requirement=lead_json.get("requirement", "Water Leakage Consultation")
                 )
+                return JSONResponse({"reply": clean_reply, "lead_captured": True})
             except Exception as parse_err:
                 print(f"Lead parsing error: {parse_err}")
-            return JSONResponse({"reply": clean_reply, "lead_captured": True})
+                return JSONResponse({"reply": clean_reply, "lead_captured": False})
 
-        return JSONResponse({"reply": raw_text, "lead_captured": False})
+        return JSONResponse({"reply": clean_formatting(raw_text), "lead_captured": False})
 
     except Exception as e:
-        print(f"Execution Error: {str(e)}")
+        print(f"Execution Error: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return JSONResponse({
-            "reply": "If water is actively leaking, please isolate your supply valve immediately to prevent water damage. Could you let me know if the leak is from the drainage trap or the pressurized supply lines?"
+            "reply": (
+                "I am sorry, our diagnostics system is temporarily busy. In the meantime, if water is actively "
+                "leaking, please turn off the isolation valve for that supply line and place a container under "
+                "the leak. Please share your name, phone number and city, and one of our engineers will contact "
+                "you shortly."
+            ),
+            "lead_captured": False
         }, status_code=200)
 
+
 @app.get("/leads", response_class=HTMLResponse)
-async def view_leads(request: Request):
+async def view_leads(request: Request, admin: str = Depends(require_admin)):
     db_path = BASE_DIR / "database.db"
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
