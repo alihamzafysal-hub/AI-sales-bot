@@ -122,7 +122,7 @@ async def chat_endpoint(payload: ChatPayload):
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_PROMPT,
                         temperature=0.6,
-                        max_output_tokens=400
+                        max_output_tokens=150
                     )
                 )
                 if response and response.text:
