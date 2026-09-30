@@ -95,12 +95,12 @@ async def chat_endpoint(payload: ChatPayload):
             role = "user" if msg.role == "user" else "model"
             contents.append(types.Content(
                 role=role,
-                parts=[types.Part.from_text(text=msg.content)]
+                parts=[types.Part(text=msg.content)]
             ))
 
         contents.append(types.Content(
             role="user",
-            parts=[types.Part.from_text(text=payload.message)]
+            parts=[types.Part(text=payload.message)]
         ))
 
         response = None
