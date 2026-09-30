@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import sqlite3
 from pathlib import Path
 from typing import List
@@ -47,32 +48,13 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
     conn.commit()
     conn.close()
 
-# Ultra-fast, plain-text specialist prompt
-SYSTEM_PROMPT = """
-You are the Senior Technical Specialist at NextGen Leak & Water Damage Solutions.
+SYSTEM_PROMPT = """You are the Senior Technical Specialist at NextGen Leak & Water Damage Solutions.
 Rules:
-1. Respond in plain, clean English. NEVER use markdown symbols like **, ###, or bullet asterisks.
-2. Keep every response SHORT and urgent (maximum 2 to 3 sentences).
-3. First provide immediate triage (e.g. shut off the main valve), then ask where the leak is.
-4. When the user gives their contact details, silently append:
-LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
-"""
-Your Core Knowledge & Expertise:
-1. Ceiling & Roof Leaks: Acoustic leak detection, moisture mapping, roof flashing, and freeze-thaw pipe cracks.
-2. Under-Slab & Foundation Leaks: Non-destructive ultrasonic detection, thermal imaging, pressure testing.
-3. Pipe Bursts & High Pressure: Immediate safety advice (turn off main stopcock/shut-off valve), isolation of electrical circuits near water.
-4. Damp, Mold & Structural Drying: Commercial dehumidification, psychrometric drying, and air sanitization.
-
-Your Communication Framework:
-- Tone: Empathetic, highly technical, reassuring, and professional.
-- First Step (Triage): When user states a problem, provide immediate practical advice (e.g., "First, please shut off your main water valve to prevent ceiling collapse").
-- Second Step (Diagnosis): Explain what causes this issue (e.g., hidden pinhole copper pipe failure, failed silicone joints, or pressure spikes).
-- Third Step (Action): Offer a certified engineer visit or detailed quotation. Politely ask for their Name, Contact Phone/Email, and Postcode/City.
-- Always communicate fluently in English.
-
-Hidden Lead Trigger:
-Once the customer has provided contact details (name with phone or email), append this exact block at the very end of your response:
-LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}
+1. Always respond in plain, clean English. Never use markdown symbols like **, ###, or bullet asterisks.
+2. Keep responses fast, concise, and reassuring (maximum 2 to 3 sentences).
+3. Provide immediate safety triage first (such as shutting off the main stopcock or avoiding electrical hazards), then ask where the leak or dampness is located.
+4. When the user provides contact details, append this exact block at the very end:
+LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}"""
 
 class ChatMessage(BaseModel):
     role: str
@@ -86,8 +68,6 @@ class ChatPayload(BaseModel):
 async def home(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
-import time
-
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatPayload):
     try:
@@ -98,7 +78,7 @@ async def chat_endpoint(payload: ChatPayload):
         client = genai.Client(api_key=api_key)
 
         contents = []
-        for msg in payload.history[-6:]:
+        for msg in payload.history[-4:]:
             role = "user" if msg.role == "user" else "model"
             contents.append(types.Content(
                 role=role,
@@ -110,17 +90,16 @@ async def chat_endpoint(payload: ChatPayload):
             parts=[types.Part.from_text(text=payload.message)]
         ))
 
-        # 503 High Demand Auto-Retry Loop (3 attempts)
         response = None
         last_error = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model="gemini-3.8-flash",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_PROMPT,
-                        temperature=0.6,
+                        temperature=0.4,
                         max_output_tokens=150
                     )
                 )
@@ -128,14 +107,13 @@ async def chat_endpoint(payload: ChatPayload):
                     break
             except Exception as err:
                 last_error = err
-                time.sleep(1.5)  # Spike pass hone ke liye brief wait
+                time.sleep(1)
 
         if not response or not response.text:
             raise last_error
 
         raw_text = response.text.strip()
 
-        # Lead capture logic
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -154,10 +132,11 @@ async def chat_endpoint(payload: ChatPayload):
         return JSONResponse({"reply": raw_text, "lead_captured": False})
 
     except Exception as e:
-        print(f"Final Execution Error: {str(e)}")
+        print(f"Execution Error: {str(e)}")
         return JSONResponse({
-            "reply": "I am currently assessing technical data. Please let me know where the leak is located (ceiling, pipe, or underfloor) so I can advise immediate safety steps."
+            "reply": "Please shut off your main stopcock immediately if water is active. Where is the water leaking from so I can advise next steps?"
         }, status_code=200)
+
 @app.get("/leads", response_class=HTMLResponse)
 async def view_leads(request: Request):
     db_path = BASE_DIR / "database.db"
