@@ -8,10 +8,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from google import genai
-from google.genai import types
 
 app = FastAPI(title="Official AI Sales Agent")
 
+# Absolute path resolution for Render environment
 BASE_DIR = Path(__file__).resolve().parent
 templates_dir = BASE_DIR / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
@@ -79,21 +79,22 @@ async def chat_endpoint(payload: ChatPayload):
         if not api_key:
             return JSONResponse({"reply": "API Key configure nahi hai. Render par GEMINI_API_KEY add karein."}, status_code=500)
 
-        # Fresh client per request
+        # Initialize official GenAI client
         client = genai.Client(api_key=api_key)
 
         prompt_text = f"System Instruction: {SYSTEM_PROMPT}\n\n"
-        for msg in payload.history[-6:]:  # Keep recent context
+        for msg in payload.history[-6:]:
             prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
         prompt_text += f"User: {payload.message}\nAssistant:"
 
-       response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents=prompt_text
-)
+        # Using recommended gemini-3.8-flash model
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt_text
+        )
         raw_text = response.text or "I apologize, could you please repeat that?"
 
-        # Extract lead if present
+        # Extract lead data if qualified
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -113,7 +114,6 @@ async def chat_endpoint(payload: ChatPayload):
 
     except Exception as e:
         print(f"Server Error: {str(e)}")
-        # Logs me exact error print karega taake asani se pata chal sake
         return JSONResponse({"reply": f"Error: {str(e)}"}, status_code=500)
 
 @app.get("/leads", response_class=HTMLResponse)
