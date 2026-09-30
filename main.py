@@ -50,19 +50,23 @@ def save_lead(name: str, email: str, phone: str, requirement: str):
 
 SYSTEM_PROMPT = """You are the Senior Technical Diagnostics Specialist at NextGen Leak & Water Damage Solutions.
 
-Rules & Communication Behavior:
-1. When a client initiates contact with a greeting (e.g., 'hi', 'hello', 'hey', 'start'), ALWAYS respond with this exact comprehensive technical introduction:
-"Hello, and welcome to NextGen Leak & Water Damage Solutions. I’m a Senior Diagnostics Engineer with the technical team. Whether you're dealing with an active emergency leak, an unexplained drop in system pressure, hidden damp, or water ingress through ceilings or foundations, I'm here to help you assess and resolve the issue safely. To help me give you the best advice: Are you currently experiencing an active leak or water damage? If so, could you briefly describe what you're seeing?"
+Rules & Diagnostic Protocol:
+1. First Greeting:
+   When the client says hello/hi, introduce yourself fully and ask about their leak situation. E.g.:
+   "Hello and welcome to NextGen Leak & Water Damage Solutions. I am a Senior Diagnostics Engineer with our technical team. Whether you are dealing with an active burst pipe, sink drainage leakage, ceiling ingress, or hidden damp, I am here to help. Could you tell me where the water is leaking from and whether it is actively flowing right now?"
 
-2. When the client explains their specific problem:
-   - Provide immediate safety triage advice first (e.g., isolate main stopcock/shut-off valve, avoid electrical switches in wet areas, or place collection buckets).
-   - Offer a technical diagnosis of the root cause (e.g., pinhole copper pipe corrosion, failed waste trap seals, high system pressure, or external masonry water ingress).
-   - Offer dispatching a certified acoustic detection engineer or damp survey team. Politely request their Name, Contact Phone Number, and Postcode/City to arrange immediate support.
+2. When the client explains their problem (e.g. sink leak, ceiling leak, pipe issue):
+   - Always give complete, helpful, step-by-step technical advice. Never give short one-word or half-sentence replies.
+   - Step 1: Immediate Safety/Triage (e.g., turn off the isolation valve under the sink, place a bucket, stop using the appliance).
+   - Step 2: Technical Cause (e.g., failed P-trap rubber washer, corroded copper pipe, loose compression nut, or silicone seal degradation).
+   - Step 3: Professional Action (offer to dispatch an engineer or provide a quotation, and ask for their Name, Phone number, and Postcode/City).
 
-3. Always communicate in professional, clear, and reassuring English. Never truncate sentences.
+3. Formatting:
+   Always respond in clean, fluent English. Complete every sentence thoroughly. Do not use asterisks or hashes.
 
-4. Once the client provides their contact details (name and phone/email), silently append this exact block at the very end of your response:
-LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}"""
+4. Lead Extraction:
+   Whenever the client shares their contact details (name with phone or email), append this exact hidden block at the very end of your reply:
+   LEAD_DATA: {"name": "...", "email": "...", "phone": "...", "requirement": "..."}"""
 
 class ChatMessage(BaseModel):
     role: str
@@ -85,24 +89,33 @@ async def chat_endpoint(payload: ChatPayload):
 
         client = genai.Client(api_key=api_key)
 
-        prompt_text = f"System Instructions:\n{SYSTEM_PROMPT}\n\nRecent Conversation History:\n"
+        # Build clean structured multi-turn conversation
+        contents = []
         for msg in payload.history[-6:]:
-            role_label = "Client" if msg.role == "user" else "Specialist"
-            prompt_text += f"{role_label}: {msg.content}\n"
-        prompt_text += f"Client: {payload.message}\nSpecialist:"
+            role = "user" if msg.role == "user" else "model"
+            contents.append(types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=msg.content)]
+            ))
+
+        contents.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=payload.message)]
+        ))
 
         response = None
         last_error = None
-        
-        # 2-attempt retry loop for high traffic spikes
+
+        # Retry loop for traffic spikes
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model="gemini-3.8-flash",
-                    contents=prompt_text,
+                    contents=contents,
                     config=types.GenerateContentConfig(
-                        temperature=0.4,
-                        max_output_tokens=150
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0.5,
+                        max_output_tokens=600
                     )
                 )
                 if response and response.text:
@@ -116,7 +129,7 @@ async def chat_endpoint(payload: ChatPayload):
 
         raw_text = response.text.strip()
 
-        # Handle lead capture
+        # Lead capture handling
         if "LEAD_DATA:" in raw_text:
             parts = raw_text.split("LEAD_DATA:")
             clean_reply = parts[0].strip()
@@ -126,7 +139,7 @@ async def chat_endpoint(payload: ChatPayload):
                     name=lead_json.get("name", "N/A"),
                     email=lead_json.get("email", "N/A"),
                     phone=lead_json.get("phone", "N/A"),
-                    requirement=lead_json.get("requirement", "Water Leakage Technical Consultation")
+                    requirement=lead_json.get("requirement", "Water Leakage Consultation")
                 )
             except Exception as parse_err:
                 print(f"Lead parsing error: {parse_err}")
@@ -137,7 +150,7 @@ async def chat_endpoint(payload: ChatPayload):
     except Exception as e:
         print(f"Execution Error: {str(e)}")
         return JSONResponse({
-            "reply": "If you are dealing with an active water leak, please locate and shut off your main stopcock valve immediately. Where is the water coming from (ceiling, pipes, or underfloor) so I can advise immediate safety steps?"
+            "reply": "If water is actively leaking, please isolate your supply valve immediately to prevent water damage. Could you let me know if the leak is from the drainage trap or the pressurized supply lines?"
         }, status_code=200)
 
 @app.get("/leads", response_class=HTMLResponse)
