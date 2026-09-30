@@ -66,6 +66,34 @@ class ChatPayload(BaseModel):
     history: List[ChatMessage]
     message: str
 
+# Cache the best working model dynamically
+CACHED_MODEL = None
+
+def get_active_model(client: genai.Client) -> str:
+    global CACHED_MODEL
+    if CACHED_MODEL:
+        return CACHED_MODEL
+
+    try:
+        # Google API se automatically active models ki list maango
+        models = client.models.list()
+        candidates = []
+        for m in models:
+            name = m.name
+            # Pro models free tier par allow nahi hotay (quota 0 hota hai), sirf Flash / Standard models lein
+            if "flash" in name.lower() and "generateContent" in getattr(m, "supported_actions", ["generateContent"]):
+                candidates.append(name.replace("models/", ""))
+
+        if candidates:
+            # Sab se latest active model select karo
+            CACHED_MODEL = candidates[-1]
+            return CACHED_MODEL
+    except Exception as e:
+        print(f"Auto-detection fallback warning: {e}")
+
+    # Fallback to general flash if listing fails
+    return "gemini-3.8-flash"
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -75,7 +103,7 @@ async def chat_endpoint(payload: ChatPayload):
     try:
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key:
-            return JSONResponse({"reply": "Render par GEMINI_API_KEY set nahi hai."}, status_code=500)
+            return JSONResponse({"reply": "GEMINI_API_KEY environment variable set nahi hai."}, status_code=500)
 
         client = genai.Client(api_key=api_key)
 
@@ -84,26 +112,20 @@ async def chat_endpoint(payload: ChatPayload):
             prompt_text += f"{msg.role.capitalize()}: {msg.content}\n"
         prompt_text += f"User: {payload.message}\nAssistant:"
 
-        # Multi-model fallback: agar aik busy ho to agla khud handle kare
-        models_to_try = ["gemini-3.8-flash", "gemini-3.1-pro-preview"]
-        raw_text = None
-        last_error = None
+        # Google se live valid model uthao
+        selected_model = get_active_model(client)
 
-        for model_name in models_to_try:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt_text
-                )
-                if response and response.text:
-                    raw_text = response.text
-                    break
-            except Exception as e:
-                last_error = e
-                continue
-
-        if not raw_text:
-            return JSONResponse({"reply": f"Traffic high hai, please 10 seconds baad dobara try karein. (Details: {str(last_error)})"}, status_code=500)
+        try:
+            response = client.models.generate_content(
+                model=selected_model,
+                contents=prompt_text
+            )
+            raw_text = response.text or "I apologize, could you please repeat that?"
+        except Exception as api_err:
+            # Agar rate limit (429) ya issue aaye to cached reset kar ke ek dafa fallback try karein
+            global CACHED_MODEL
+            CACHED_MODEL = None
+            return JSONResponse({"reply": f"Model busy: {str(api_err)}"}, status_code=500)
 
         # Lead capture handling
         if "LEAD_DATA:" in raw_text:
